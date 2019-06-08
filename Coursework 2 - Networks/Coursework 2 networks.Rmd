@@ -1,0 +1,413 @@
+---
+title: "Coursework 2 - Networks"
+author: "Alexander Pinches"
+date: "11 January 2019"
+output: 
+  html_document: 
+    theme: paper
+    highlight: pygments
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require("igraph")#networks
+require("dplyr")#pipe
+require("plotly")#interactive plots
+require("gridExtra")#grid plotting
+require("reshape2")#reshaping matricies
+require("visNetwork")#interactive networks
+require("RColorBrewer")#colours
+load("doctornet.Rdata")#load
+```
+
+#Question 1
+We convert the graph to undirected using `as.undirected()`. We then calcute the number of edges, verticies and mean degree using functions from igraph and print them. We then create a histogram of degree to show the degree distribution of the network.
+```{r,stats}
+docnet2 <- as.undirected(docnet2)#remove directions
+n_edges <- ecount(docnet2)#store number of edges
+n_vert <- vcount(docnet2)#store number of vertices
+degree <- degree(docnet2)#store degree
+sprintf("Number of vertices:%s, Number of edges:%s, Mean degree:%s",n_vert,n_edges,mean(degree))#print string with basic statistics
+hist(degree,-1:max(degree),main = "Degree distribution",xlab = "Degree")#plot histogram
+
+```
+
+If scale free and a power-law distribution if whe have a large tail we see this isn't the case and most of the values are centered around the mean. We can further illistracte this with spectral analysis. As the more skewed the degree distribution is the larger the largest eigenvalue of the adjacency matrix is. We can see from the histogram that the eigenvalues are small so the degree distribution isn't skewed and therefore isnt scale free as we need a long tail for a scale free distribution ie skewed.
+
+```{r, spectral, warning=FALSE}
+a <-as_adjacency_matrix(docnet2, type = c("both", "upper", "lower"))#make adjecency matrix
+ev_a <- eigen(a)#calculate eigen vals 
+eigenvalues_a <- ev_a$values#exctract eigen values
+hist_ev_a <- hist(eigenvalues_a, min(eigenvalues_a):max(eigenvalues_a), breaks=100, plot = TRUE,main="Eigenvalues of adjacency matrix",xlab = "Eigenvalue")$count#plot histogram and store values
+sprintf("Max eigenvalue:%s",max(eigenvalues_a))#print max value
+```
+
+This also makes sense as the no doctor can talk to every other.
+
+
+#Question 2
+
+##Newmans eigenvector method
+
+For the newmans eigenvector method for the communities of a network with adjacency matrix $A$ we calculate the modularity matrix defined as the adjacency matrix minus the matrix of probability theres an edge between two nodes. It then calculates the eigenvector of the modulatity matrix with the largest eigenvalue then sort the network into two communies based on the sign of values of the eigenvector. We use a function in igraph to calculate the communities in the network. We output the results in a confusion matrix.
+```{r,newman}
+clust_newman <- cluster_leading_eigen(graph = docnet2)#apply newmans eigenvector method
+communities_newman <- clust_newman$membership#extract membership
+communities_real <- V(docnet2)$nodeCity#extract real communities
+
+table(communities_newman,communities_real)#create table
+
+```
+We notice that the method finds 5 communities when only 4 exist in the network. We then plot the network with verticies coloured by the community predicted by the Newmans eigenvectoir method. 
+
+```{r,newman plot}
+par(mfrow=c(1,1),oma = c(5,4,0,0) + 0.1, mar = c(0,0,1,1) + 0.1)#set space in plotting device
+colours <- rainbow(max(communities_newman))#create color vector
+#plot network coloured by predicted communities
+plot(docnet2,vertex.size=3,edge.arrow.size=0.1, vertex.color=colours[communities_newman], vertex.frame.color=NA,xlim=c(-1,1),ylim=c(-1,1),vertex.label=NA,main="Newman Communities")
+legend('bottomleft',legend = unique(communities_newman),pt.cex=1,pch=21,pt.bg = colours, title = "Communities",cex = 0.75)
+
+```
+
+We notice the first community has been split into two by the method which is shown in the plot and in the confusion matrix.
+
+##Betweenness
+Another method is edge betweenness. We calculate for each pair of edges $x,y$ the number of shortest paths between them ($\sigma_{x,y}$) and the number of shortest paths pass through a edge $e$($\sigma_{x,y}(e)$. Then $Betweenness(v)=\sum_{x\neq e \neq y \in E} \dfrac{\sigma_{x,y}(e)}{\sigma_{x,y}}$. Then deletes the edge with the greatest edge betweenness and repeats to find communities. We calculate the communities using a function in igraph and print a table of results.
+```{r, betweenness}
+communities_between <- cluster_edge_betweenness(docnet2)$membership#calculate cluster membership by betweenness
+table(communities_between,communities_real)#create table
+
+```
+We see that betweenness finds 13 communities when only 4 exist most of which are subgraphs in the community 1. We plot the network below. 
+```{r, betweenness plot}
+g <- docnet2#store network
+V(g)$color.background <- c(brewer.pal(12,"Paired"),"red")[communities_between]#add colours based on predicted membership 
+V(g)$label <- communities_newman#create labels
+V(g)$color.border <- "black"#set border colour
+V(g)$color.highlight.background <- "orange"#set highlight background colour
+V(g)$color.highlight.border <- "darkred"#set highlight border colour
+
+visIgraph(g,type="full",idToLabel=F)#plot interactive network
+
+```
+
+
+##Propagating labels
+
+Propagating labels works by assigning each vertex a label and updating the label by majority voting in the neighborhood of the vertex. We use a function in igraph to calculate the communities and output a confusion table.
+
+```{r, prop levels}
+communities_prop <- cluster_label_prop(docnet2)$membership#calculate cluster membership by prop labels
+table(communities_prop,communities_real)#create table
+```
+We see unlike the previous methods it acheives 100% accuracy with community 1 unlike the previous methods but finds 2 extra catagories consisting of the third community. We plot the network below with verticies coloured by predicted community. 
+```{r, prop levels plot}
+colours <- rainbow(max(communities_prop))#create colour vector
+#plot network with verticies coloured by predicted community
+plot(docnet2,vertex.size=3,edge.arrow.size=0.1, vertex.color=colours[communities_prop], vertex.frame.color=NA,xlim=c(-1,1),ylim=c(-1,1),vertex.label=NA,main="Propagating Labels Communities")
+legend('bottomleft',legend = unique(communities_prop),pt.cex=1,pch=21,pt.bg = colours, title = "Communities",cex = 0.75)
+
+```
+
+
+
+##Multi-level optimisation of modularity
+
+The function from igraph impliments a multi-level modularity optimisation algorithm for finding communities. Where modularity is a measure of the strength of a division of a network into modules (communities). We output a confusion table below.
+```{r, lou}
+communities_lou <- cluster_louvain(docnet2)$membership#calc membership
+table(communities_lou,communities_real)#create table
+```
+
+This method also finds an additional community which is almost all community 1. A interactive plot is shown below with verticies coloured according to their predicted community.
+
+```{r, lou plot}
+V(g)$color.background <- brewer.pal(max(communities_lou),"Paired")[communities_lou]#assign vertex colours
+visIgraph(g,type="full",idToLabel=F) #plot interactive graph
+```
+
+##Spin-glass
+This function in igraph tries to find communities in a network via a spin-glass model and simulated annealing. Where the spin-glass model is a statistical model that models the magnetic spin of atoms in a disordered magnet. Simulated annealing is a probabilitstic technique for finding the global optimum of a given function in this case the spin-glass model, A confusion matrix of the results is outputted below.  
+```{r,spin}
+communities_spin <- cluster_spinglass(docnet2)$membership#calculate membership
+table(communities_spin,communities_real)#create table
+```
+
+We notice this technique finds 3 extra communities again primarily by splitting up the first community. We plot a graph with verticies coloured by predicted community below.
+
+
+```{r, spin plot}
+colours <- rainbow(max(communities_spin))#create colour vector
+#plot graph with verticies coloured by predicted community
+plot(docnet2,vertex.size=3,edge.arrow.size=0.1, vertex.color=colours[communities_spin], vertex.frame.color=NA,xlim=c(-1,1),ylim=c(-1,1),vertex.label=NA,main="Spin-glass Communities")
+legend('bottomleft',legend = unique(communities_spin),pt.cex=1,pch=21,pt.bg = colours, title = "Communities",cex = 0.75)
+
+```
+
+##Random walks
+
+This function from igraph tries to find communities by random walks and is based on the idea that short random walks will tend to stay within the same community. We output a confusion matrix below.
+
+```{r, rand walks}
+communities_walk <- cluster_walktrap(docnet2)$membership#calculate membership
+table(communities_walk,communities_real)#create table
+```
+
+We notice this method finds 5 extra communities in the network with community 1 being the main source of inaccuracy. We plot the network below with verticies coloured by predicted community.
+
+
+```{r, rand walk plots}
+colours <- rainbow(max(communities_walk))#create colour vector
+#plot graph with verticies coloured by predicted community
+plot(docnet2,vertex.size=3,edge.arrow.size=0.1, vertex.color=colours[communities_walk], vertex.frame.color=NA,xlim=c(-1,1),ylim=c(-1,1),vertex.label=NA,main="Random Walk Communities")
+legend('bottomleft',legend = unique(communities_walk),pt.cex=1,pch=21,pt.bg = colours, title = "Communities",cex = 0.75)
+
+```
+
+
+##Comparison
+
+To compare the methods we calculate their accuracy. We see propagating labels has the highest average accuracy although newman has the highest minimum accuracy for the communities.
+```{r,acc}
+n <- table(communities_real)#count and store number of verticies in each community
+#calculate accuracies
+acc_newman <- apply(table(communities_newman,communities_real),2,max)/n 
+acc_betw <- apply(table(communities_between,communities_real),2,max)/n 
+acc_prop <- apply(table(communities_prop,communities_real),2,max)/n 
+acc_lou <- apply(table(communities_lou,communities_real),2,max)/n 
+acc_spin <- apply(table(communities_spin,communities_real),2,max)/n 
+acc_walk <- apply(table(communities_walk,communities_real),2,max)/n 
+
+acc <- rbind(acc_newman,acc_betw,acc_prop,acc_lou,acc_spin,acc_walk)#create single accuracy matrix
+acc_stat <- cbind(apply(acc, 1, max),apply(acc, 1, min),apply(acc, 1, mean))#create matrix of accuracy stats
+colnames(acc_stat) <- c("max","min","mean")#assign column names
+print(acc_stat)#print
+
+```
+
+We can also compare the number of extra communities predicted by the methods. We print the number of phantom communities below. 
+
+```{r,phantom}
+phantom_communities <- c(length(unique(communities_newman)),length(unique(communities_between)),length(unique(communities_prop)),length(unique(communities_lou)),length(unique(communities_spin)),length(unique(communities_walk))) - 4#calculate number of extra communities predicted
+names(phantom_communities) <- c("Newman","Betweenness","Prop","Mod","Spin-glass","Walks")#assign names
+print(phantom_communities)#print
+```
+
+We see that betweenness had by far the most phantom communities at 9 despite its accuracy being high followed by random walks. Newman offers the best accuracy overall with only 1 extra community identified and the second highest mean accuracy and the highest minimum accuracy. Random walks is the worst performing method with 5 extra communities and the lowest mean.
+
+The similarities between the methods were they all had a max accuracy of 1 so they all performed well in identifying a community but not always the same one. Most except propagating labels had their lowest accuracy on the first city. They also all identified phantom communities in the network.
+
+#Question 3
+
+We can find the size of the largest component by using component to find components of the network and we can see if the maximal component by size is giant.
+
+```{r,gc}
+size_largest_component <- max(components(docnet2)$csize)#calculate size of largest component
+sprintf("Largest component size:%s, Fraction of total vertices:%s",size_largest_component, size_largest_component/n_vert)#print
+```
+So the graph has a giant component of the size of the entire network (242 verticies). For a Erdo-Renyi random graph of size $m$ with probabilty $p$ of being conected to another node and $u$ the probability of being connected to the giant component. We define A as the probabilty a node is not connected to another and we define B as the probability a node is connected to another node but not the giant component.
+$$ \Pr(A) = 1 - p $$ 
+$$\Pr(B) = p \cdot u$$
+Therefore the total probability of not being connected to the GC is $$u = \left(1 - p + p\cdot u \right)^{m-1}=\left(1 + \left(u-1 \right)p \right)^{m-1}$$
+We define $<k>$ as the mean degree of the network.
+$$u=\left(1 - \left(1-u \right)\cdot\dfrac{<k>}{m-1} \right)^{m-1}$$
+Taking the log and setting m large we reach the following approximation.
+$$\log(u)= \left(m-1\right)\log\left(1-\left(1-u \right)\cdot\dfrac{<k>}{m-1} \right) \approx - <k>\cdot \left(1-u\right)$$
+$$\implies u = e^{-<k>\cdot\left(1-u\right)}$$
+For m large we can then also let $x=1-u$be the fraction of nodes in the GC. This gives us an equation for the size of the GC.Whe then define 
+$$x = 1 - e^{<k>\cdot x}$$
+For small mean degree $<k>$ the only solution is $x=0$ where there is no giant component.At a critical $<k>$ a second solution appears. We can find the critical $<k>$ where this phase transition occurs by the gradient of $x$ and $1 - e^{<k>\cdot x}$ match at $x=0$.
+$$\frac{d}{dx}\left(1 - e^{<k>\cdot x}\right)\Bigg|_{x=0}=1$$
+$$\implies <k>=1$$
+So it is likely very disconnected when the average degree is 1. The average degree is 1 when the number of nodes and the number of edges are equal so appoximately when the fraction of edges removed is $\dfrac{1108-242}{1108} \backsim 0.7816$ theoreticallly if the graph is a Erdos-Renyi random graph.
+We calculate the size of the maximal component as we delete edges at random for 100 iterations. The results are plotted below with the theoretical shown on the graph.
+
+```{r,gc rand remove}
+max_component <- matrix(NA, nrow = n_edges,ncol = 100)#create matrix to store largest component
+for (r in 1:100){#number of tests
+  sample <- sample(1:n_edges,n_edges)
+  for (i in 1:n_edges){#delete edges
+    graph_deleted <- docnet2 %>% delete.edges(sample[1:i])#delete a random edges
+    max_component[i,r] <- max(components(graph_deleted)$csize)#calculate size of largest component
+  }
+}
+
+#create data frame to pass to plotting function of avg/min/max component size for number of edges randomly deleted
+component_size <- data.frame("fraction"=(1:n_edges)/n_edges,"mean"=apply(max_component,1,mean),"max"=apply(max_component,1,max),"min"=apply(max_component,1,min))
+
+#create interactive plot
+plot_ly(component_size,x=~fraction,y=~mean,name="Mean largest component", type="scatter", mode="lines") %>% 
+  add_trace(y=~max, name="Max largest component", line=list(dash="dash")) %>%
+  add_trace(y=~min,name="Min largest component", line=list(dash="dash")) %>%
+  add_segments(x = (1108-242)/1108, xend = (1108-242)/1108, y = 0, yend = 250, name="Theoretical value") %>%
+  layout(title="Largest component for fraction of edges randomly deleted",
+         xaxis=list(title="Fraction of edges deleted"),
+         yaxis=list(title="Size of largest component"),
+         legend = list(x = 100, y = 1))
+
+
+```
+
+We see that as we delete $\backsim 0.8$ fraction of edges on average to have a substantial effect on the size of the largest component. This is similar to the theoretical value suggesting this graph is close to being a Erdos-Renyi random graph but as it is not the same it has some structure and isnt completely randomly connected. Which makes sense as we have communities that are more connected with each other than they are with members of other communities.
+
+#Question 4
+
+##Centrality measures
+
+For the newmans eigenvector method for the centrality of a node with adjacency matrix $A$ and eigen values $\lambda$ is defined as $x_{i}^{EC}=\dfrac{1}{\lambda_{i}} \sum_{j} A_{ij}x_{j}$.
+For Betweenness We calculate for each pair of verticies $x,y$ the number of shortest paths between them ($\sigma_{x,y}$) and the number of shortest paths pass through a vertex $v$($\sigma_{x,y}(v$). Then $Betweenness(v)=\sum_{x\neq v \neq y \in V} \dfrac{\sigma_{x,y}(v)}{\sigma_{x,y}}$.
+Closeness centrality is the reciprical of the sum of the length of the shrotest path between a vertex and all other verticies.
+Degree centrality is simply the degree of a vertex. we will also try the mean centrality score to see if an ensemble technique increases the amount of disruption.
+We calculate the centrality scores below and print the 10 nodes with the highest centralities.
+```{r, centrality}
+#calculate centrality values
+c_deg <- centr_degree(docnet2)$res#degree
+c_betw <- centr_betw(docnet2)$res#betweenness
+c_clo <- centr_clo(docnet2)$res#closeness
+c_eig <- centr_eigen(docnet2)$vector#eigen
+
+centrality <- cbind(c_deg,c_betw,c_clo,c_eig)#combine into 1 matrix
+
+normalise <- function(x){#create a normalise function
+  x/sqrt(sum(x^2)) 
+}
+
+normalised_centrality <- apply(centrality,2,normalise)#normalise centrality scores
+
+mean_centrality <- apply(normalised_centrality,1,mean)#calc mean centrality
+
+ord_centrality <- cbind(order(mean_centrality),mean_centrality)#nodes ordered by scores
+colnames(ord_centrality) <- c("Node","mean_centrality")#assign colnames
+
+head(ord_centrality[,1],10)#print top 10
+ord_centrality_ind <- apply(centrality, 2, order)#nodes ordered by scores
+head(ord_centrality_ind,10)#print top 10 of each
+```
+To measure the disruption as we delete these nodes we will calculate the number of remaining edges, the clustering coefficent, the number of components and the size of the GC. Below we calculate these values.
+```{r,gc centrality}
+n <- cbind(ord_centrality_ind,ord_centrality[,1])#create matrix of all order
+max_component_c <- matrix(NA,nrow=(n_vert-1),ncol=ncol(n))#create matrix to store largest component size
+edges <- matrix(NA,nrow=(n_vert-1),ncol=ncol(n))#create matrix to store edges
+components <- matrix(NA,nrow=(n_vert-1),ncol=ncol(n))#create matrix to store num of componenets
+clust_coef <- matrix(NA,nrow=(n_vert-1),ncol=ncol(n))#create matrix to store clust coef
+for (r in 1:ncol(n)){#repeat for each method
+  for (i in 1:(n_vert-1)){#remove verticies
+    graph_deleted <- docnet2 %>% delete.vertices(n[1:i,r])#remove verted in order
+    max_component_c[i,r] <- max(components(graph_deleted)$csize)#calculate size of the largest component
+    edges[i,r] <- ecount(graph_deleted)#calculate and store cedges
+    components[i,r] <- components(graph_deleted)$no#store number of components
+    clust_coef[i,r] <- transitivity(graph_deleted)#store cluster coef
+  }
+}
+#change to dataframe for plotting
+max_component_c <- as.data.frame(max_component_c)
+edges <- as.data.frame(edges)#
+components <- as.data.frame(components)
+clust_coef <- as.data.frame(clust_coef)
+
+#assign column names
+colnames(max_component_c) <- c("c_deg","c_betw","c_clo","c_eig","c_mean")
+colnames(edges) <- c("c_deg","c_betw","c_clo","c_eig","c_mean")
+colnames(components) <- c("c_deg","c_betw","c_clo","c_eig","c_mean")
+colnames(clust_coef) <- c("c_deg","c_betw","c_clo","c_eig","c_mean")
+
+#add nodes deleted column
+max_component_c$nodes <- 1:241
+edges$nodes <- 1:241
+components$nodes <- 1:241
+clust_coef$nodes <- 1:241
+```
+
+###Max component size
+
+```{r,max comp plot}
+#create interactive plot of the max component size
+plot_ly(max_component_c,x=~nodes,y=~c_deg,name="Degree", type="scatter", mode="lines") %>% 
+  add_trace(y=~c_betw, name="Betweenness") %>%
+  add_trace(y=~c_clo,name="Closeness") %>%
+  add_trace(y=~c_eig,name="Eigen") %>%
+  add_trace(y=~c_mean,name="Mean") %>%
+  layout(title="Largest component for fraction of central verticies deleted",
+         xaxis=list(title="Number of verticies deleted"),
+         yaxis=list(title="Size of largest component"),
+         legend = list(x = 100, y = 1))
+```
+
+I we split the graphs up to see thm more clearly we see they reduce the size of the largest component at a similar rate. The faster they decrease the more they are disrupting the network but theyre all similar.
+```{r,centrality plots}
+colour <- rainbow(5)#create colour vector
+#create line graph plots an store
+p1 <- ggplot(data=max_component_c,aes(x=nodes,y=c_deg)) + geom_line(colour=colour[1]) + ggtitle("Degree") + xlab("Number of vertices deleted") + ylab("Size of largest component")
+p2 <- ggplot(data=max_component_c,aes(x=nodes,y=c_betw)) + geom_line(colour=colour[2]) + ggtitle("Betweenness") + xlab("Number of vertices deleted") + ylab("Size of largest component")
+p3 <- ggplot(data=max_component_c,aes(x=nodes,y=c_clo)) + geom_line(colour=colour[3]) + ggtitle("Closeness") + xlab("Number of vertices deleted") + ylab("Size of largest component")
+p4 <- ggplot(data=max_component_c,aes(x=nodes,y=c_eig)) + geom_line(colour=colour[4]) + ggtitle("Eigen") + xlab("Number of vertices deleted") + ylab("Size of largest component")
+p5 <- ggplot(data=max_component_c,aes(x=nodes,y=c_mean)) + geom_line(colour=colour[5]) + ggtitle("Mean") + xlab("Number of vertices deleted") + ylab("Size of largest component")
+
+grid.arrange(p1,p2,p3,p4,p5,layout_matrix=rbind(c(1,1,2,2,3,3),c(4,4,4,5,5,5)),top = "Largest component for vertices deleted by centrality")#arrange on grid with 3 graphs on top and two on the bottom 
+
+```
+
+###Number of edges remaining
+
+We can plot the number of edges remaining as the more they decrease the number of edges the more they disrupt the network. If we look at the plot below we see betweenness has reduced the number of edges the fasterest so has disrupted the network the most.
+```{r,edges plot}
+#create interactive plot of edge number
+plot_ly(edges,x=~nodes,y=~c_deg,name="Degree", type="scatter", mode="lines") %>% 
+  add_trace(y=~c_betw, name="Betweenness") %>%
+  add_trace(y=~c_clo,name="Closeness") %>%
+  add_trace(y=~c_eig,name="Eigen") %>%
+  add_trace(y=~c_mean,name="Mean") %>%
+  layout(title="Edges for fraction of central verticies deleted",
+         xaxis=list(title="Number of verticies deleted"),
+         yaxis=list(title="Edges remaining"),
+         legend = list(x = 100, y = 1))
+
+```
+
+###Number of components plot
+
+We can also plot the number of components that are in the network. As the more components there are the more disconnected the network is. We see betweenness and degree have the largest numbers of components betweenness overall but degree has more components first.
+```{r,component num plot}
+#create interactive plot of number of components
+plot_ly(components,x=~nodes,y=~c_deg,name="Degree", type="scatter", mode="lines") %>% 
+  add_trace(y=~c_betw, name="Betweenness") %>%
+  add_trace(y=~c_clo,name="Closeness") %>%
+  add_trace(y=~c_eig,name="Eigen") %>%
+  add_trace(y=~c_mean,name="Mean") %>%
+  layout(title="Number of components for fraction of central verticies deleted",
+         xaxis=list(title="Number of verticies deleted"),
+         yaxis=list(title="Components"),
+         legend = list(x = 100, y = 1))
+```
+
+###Cluster coefficent
+
+We can also look at the clustering coefficent as we delete nodes based on centrality. The lower the clustering coefficent the more disconnected and disrupted the network is. We see that betweenness and closeness lower the clustering coefficent the most suggesting they disrupt the network the most,
+```{r, cluster coef plot}
+#create interactive plot of clustering coefficent
+plot_ly(clust_coef,x=~nodes,y=~c_deg,name="Degree", type="scatter", mode="lines") %>% 
+  add_trace(y=~c_betw, name="Betweenness") %>%
+  add_trace(y=~c_clo,name="Closeness") %>%
+  add_trace(y=~c_eig,name="Eigen") %>%
+  add_trace(y=~c_mean,name="Mean") %>%
+  layout(title="Clustering coefficent for fraction of central verticies deleted",
+         xaxis=list(title="Number of verticies deleted"),
+         yaxis=list(title="Clustering coefficent"),
+         legend = list(x = 100, y = 1))
+```
+
+##Conclusion 
+
+Betweenness is the best centrality measure based on the plots above as it performs similarly or better than the others in the plots above as it disconnects the network the fastest thus causing the most disruption, As it reduces the cluster coefficent of the network, the number of edges and increases the number of components the fastest. Therefore the most important verticies are
+```{r,important verticies}
+print(n[1:10,2])#print top 10 betweenness verticies
+```
+
+The mean centrality performed averagly and didnt offer an improvement. Closeness and degreee are probably the two next best measures followed by the mean centrality and the worst performer was newmans eigenvalue centrality.
+
+
+
+
+
