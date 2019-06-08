@@ -1,0 +1,981 @@
+---
+title: "Coursework 1 - Machine Learning"
+author: "Alexander John Pinches"
+date: "16 November 2018"
+output: 
+  html_document: 
+    theme: paper
+    highlight: espresso
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require("ggplot2")
+require("dplyr")
+require("ROCR")
+require("MASS")
+require("e1071")
+require("randomForest")
+require("nnet")
+require("NeuralNetTools")
+require("class")
+require("reshape2")
+require("Hmisc")
+require("glmnet")
+require("mda")
+require("plotly")
+```
+#Initialise
+
+Initialise by loading data.
+
+```{r, load druguse}
+load("druguse.RData") #Load data
+```
+
+#Question 1
+
+## Question 1.1
+Using `ggplot()` and `geom_bar()` create a plot to compare drug use level within each country and rename the labels accordingly. 
+
+```{r, histogram1}
+histcountryuselevel <- ggplot(druguse,aes(x = druguse$country, fill = druguse$UseLevel)) + geom_bar() #Create bar plot
+histcountryuselevel + xlab("Country") + ylab("Use Level Count") + labs(fill='Use Level') #Assign x, y and legend labels
+```
+
+Replacing the x with the gender index of the druguse data create another plot comparing drug use by gender.  
+
+```{r, histogram2}
+histcountrygender <- ggplot(druguse,aes(x = druguse$gender, fill = druguse$UseLevel)) + geom_bar() #Create bar plot
+histcountrygender+ xlab("Gender") + ylab("Use Level Count") + labs(fill='Use Level') #Assign x, y and legend labels
+```
+
+##Question 1.2
+Using `summary()` we can show summary statistics about the data in druguse and `str()` the structure of the data frame.
+```{r, summary of inital df}
+summary(druguse) #Summary of the data frame
+```
+
+```{r, strucure of df}
+str(druguse) #Show structure of the data frame
+```
+
+Using pairs we can plot all the scatter plots possible with each pair of indicies to show any relationships between them visually.
+
+```{r, pairs,fig.height=10, fig.width=10}
+pairs(druguse, gap=0)#apply pairs to data frame 
+```
+
+We can better visualise the relationships shown by pairs by calculating the correlation matrix. Converting all of the data frame to numerics using `lapply` and `as.numeric` so that we can create a correlation matrix of the data using `cor`. We reshape the matrix using `melt` from the package `reshape2` so that we can plot a heatmap of the correlogram in `ggplot`.
+
+```{r, correlation heat plot, fig.width=10, fig.height=10}
+druguse_num <- data.frame(lapply(druguse,as.numeric)) #convert all columns to a numeric
+correlation <- cor(druguse_num) #calculate correlations
+melted_cor <- melt(correlation) #use melt to reshape correlation matrix into a dataframe for ggplot
+
+#create a heatmap of the correlation matrix in ggplot
+corplot <- ggplot(data=melted_cor, aes(x=Var1, y=Var2, fill=value)) + geom_tile() + xlab("") + ylab("") +ggtitle("Correlation Heatmap") #create plot using geom_tile and assaign labels and title
+corplot + geom_text(aes(Var2, Var1, label = round(value,2)),
+                    color = "black", size = 2) + theme(axis.text.x = element_text(angle = 90),
+                                                       plot.title = element_text(hjust = 0.5)) + scale_fill_gradientn(colours = rainbow(20)) #modify the text angle, colour and add corelation values onto each tile
+
+```
+
+This allows us to easily visualise the relationships in the data so that we can determine what to use as a predictor. We can order the correlation values and remove duplicates and correlations with its self. Then use `head` and `tail` to show highest and lowest correlation pairs.
+
+```{r,ordered corelation}
+melted_cor_ord1 <- melted_cor[order(melted_cor$value ,decreasing = T),] #order correlations
+melted_cor_ord2 <- melted_cor_ord1[seq(34,nrow(melted_cor_ord1),2),] #remove duplicates and correlation with self
+head(melted_cor_ord2, n=10) #show most positively correlated 
+tail(melted_cor_ord2, n=10) #show most negatively correlated
+```
+
+Using `rcorr` from `Hmisc` we can calculate the p values for each correlation pair to determine if the correlation is statistically significant at a given significance level. We can then similarly to the correlogram create a heat map of the p values using `ggplot`.
+
+```{r, pvalues heatmap, fig.height=10, fig.width=10}
+#use rcorr from Hmisc to calculate p values for the correlation of all elements and extract the p values 
+cor_pvalues <- rcorr(as.matrix(druguse_num))$P
+#melt to reshape for ggplot
+melted_cor_pvalues <- melt(cor_pvalues)
+melted_cor_pvalues[is.na(melted_cor_pvalues)] <- 0 #replace NAs with 0
+#create a heatmap of the correlation pvalues matrix in ggplot
+corplot <- ggplot(data=melted_cor_pvalues, aes(x=Var1, y=Var2, fill=value)) + geom_tile() + xlab("") + ylab("") +ggtitle("Correlation Pvalues Heatmap")
+corplot + geom_text(aes(Var2, Var1, label = round(value,2)),
+                    color = "black", size = 2) + theme(axis.text.x = element_text(angle = 90),
+                                                       plot.title = element_text(hjust = 0.5)) + scale_fill_gradientn(colours = c("blue","red")) 
+```
+
+Using this we can clearly see the high p values and thus which are not significantly related. We can extract the correlation pairs relating to UseLevel only to see its relationship with the predictors in the data set. 
+
+```{r, uselevel corelation}
+cor_UseLevel <- melted_cor_ord2[(melted_cor_ord2$Var1 == "UseLevel"),] #keep only correlations with UseLevel
+cor_UseLevel #print
+```
+
+We can also do this for the p values to determine which correlation pairs containing UseLevel are statistically significant.
+
+```{r, order correlation}
+#order p values highest to lowest
+melted_cor_pvalues_ord <- melted_cor_pvalues[order(melted_cor_pvalues$value ,decreasing = T),]
+head(melted_cor_pvalues_ord, 10)#show highest p values 
+tail(melted_cor_pvalues_ord, 10)#show lowest p values
+```
+
+We can then choose a significance level to test at in this case 5% to show which predictors are unlikely to be correlated with UseLevel.
+
+```{r, pvalues}
+#find p values relating to use level
+pvalues_cor_uselevel <- melted_cor_pvalues_ord[melted_cor_pvalues_ord$Var1 == "UseLevel",] #extract just those relating to UseLevel
+notsignificant <- pvalues_cor_uselevel[pvalues_cor_uselevel$value >= 0.05,] #not significant at 5% significance level
+pvalues_cor_uselevel #print
+notsignificant #print
+
+```
+
+Using `plotly` we can create a interactive 3d scatter plot with symbols for each UseLevel and 3 significant predictors for use level on the axises. The plot appears to show two groups suggesting that what we infered previously from the correlations and p values is true.
+
+```{r, interactive 3d UseLevel plot, fig.height=10, fig.width=10}
+#create new data frame as all numerical except uselevel otherwise we can't add a legend 
+druguse_num_p <- druguse_num
+druguse_num_p$UseLevel <- druguse$UseLevel
+#create 3d plot of non significant predictors
+sp3 <- plot_ly(druguse_num_p, x = ~nicotine, y = ~sensation, z= ~opentoexperience, mode = 'markers',
+               color = I('blue'), symbol = ~UseLevel, symbols = c('circle','o')) %>%#create plot and set x,y,z
+  add_markers() %>%
+  layout(scene = list(xaxis = list(title = 'Nicotine'),
+                     yaxis = list(title = 'Sensation'),
+                     zaxis = list(title = 'Open to experience')), title="3D plot of 3 significant predictors of UseLevel") #set axis labels
+sp3
+
+```
+
+Similarly to before we can extract the p values for severity to show which predictors are statistically significant for predicting severity.
+
+```{r, pvalues severity}
+pvalues_cor_severity <- melted_cor_pvalues_ord[melted_cor_pvalues_ord$Var1 == "severity",]#find p values relating to severity
+pvalues_cor_severity #print
+```
+
+We can create a 2D interactive histogram contour plot of severity and age group to show how they are distributed relative to one another.
+
+```{r fig.width=10, message=FALSE, warning=FALSE, fig.height=10}
+
+hc1 <- subplot(#use subplot so we can plot the histograms along with the contours
+  plot_ly(data=druguse,x =~agegroup, type = 'histogram', name = 'Age group'), 
+  plotly_empty(), 
+  plot_ly(druguse,x =~agegroup, y =~severity, type = 'histogram2dcontour', showscale = T, name = 'Contour'), 
+  plot_ly(druguse,y =~severity, type = 'histogram', name = 'Severity'),
+  nrows = 2, heights = c(0.2, 0.8), widths = c(0.8, 0.2), 
+  shareX = TRUE, shareY = TRUE, titleX = FALSE, titleY = FALSE
+)
+
+hc2 <- layout(hc1, showlegend = F, xaxis = list(title = 'Age group'), yaxis = list(title = 'Severity'), title = 'Histogram contour of severity and age group') #add titles and axises labels
+
+hc2 #show plot
+```
+This shows how the data is distributed relative to one another with the countours showing clusters in the data.
+We can show how each predictor is distributed individually and relative to UseLevel by plotting histograms of each.
+
+```{r, histograms, fig.height=10, fig.width=10}
+par(mfrow=c(4,4))#set 4x4 space in plotting device
+for (n in 1:16){#loop for first 16 predictors
+  t <- sprintf('Histogram of %s', colnames(druguse_num)[n])#create names for title
+  hist(druguse_num[,n], main = t, xlab = sprintf('%s', colnames(druguse_num)[n]))#create histogram
+}
+```
+
+#Question 2
+
+##Question 2.1
+Create validation and training datasets.
+
+```{r, create train and val set}
+druguse_predictors <- druguse[c(1:16,33)] #Data set of just the predictors
+druguse_train <- druguse_predictors[1:1400,] #Training dataset  
+druguse_val <- druguse_predictors[1401:1885,] #Test dataset
+```
+
+Create a logistic regression model by using `glm` and specifing `link='logit'` for a logistic regression. Output a summary of the model
+
+```{r, create logit model}
+model <- glm(UseLevel ~ ., family=binomial(link='logit'), data=druguse_train)#Create a logistic regression classifier using all predictors to predict UseLevel
+summary(model) #Summarise the model
+```
+
+Looking at the summary of the model we can use the coefficents of each predictor in the model to determine whether a smoker is more or less likely to have a high use level. The coefficent of nicotine is 0.48841 which is positive suggesting smokers are more likely and as the p value is low this suggests its statistically significant also. Chocolate has a cofficent of -0.09428 which is negative suggesting they are less likely to have a high use level however it has a high p value suggesting this might not be statistically significant and in fact there is no relationship.
+
+##Question 2.2
+Create predictions using the `predict` function and if its greater than 0.5 assaign it the value 1 for high and 0 for below 0.5 indicating low. Then calculate the errors of each type, correct predictions and create a table displaying them.
+
+```{r, predict using logit model}
+pp=predict(model, newdata=druguse_val)#Create predictions 
+mypreds=ifelse(pp>0.5, 1,0) # predict High if pp > 0.5 and predict Low otherwise.
+
+#calculate errors of each type
+TP=sum(mypreds==1 & druguse_val$UseLevel=="high")
+FP=sum(mypreds==1 & druguse_val$UseLevel=="low")
+TN=sum(mypreds==0 & druguse_val$UseLevel=="low")
+FN=sum(mypreds==0 & druguse_val$UseLevel=="high")
+
+#make table
+results <- matrix(c(TP,FP,FN,TN), ncol=2, byrow=TRUE)
+#assign names
+rownames(results) <- c("Predict High","Predict Low")
+colnames(results) <- c("Actually High", "Actaully Low")
+results <- as.table(results)
+results #print
+```
+
+##Question 2.3
+Determine the accuracy.
+
+```{r, calculate accuracy}
+Accuracy <- (TP+TN)/(TP+TN+FN+FP); Accuracy #calculate accuracy and print
+```
+
+Create `prediction` function and use `performance` to create the ROC curve.
+
+```{r, plot ROC}
+pr <- prediction(pp, as.numeric(druguse_val$UseLevel)) # create the function
+prf <- performance(pr, measure = "tpr", x.measure = "fpr") # find the performance
+plot(prf, main="ROC of logistic regression model") # plot it
+```
+
+We can also calculate the area under the ROC curve the AUC as a quantative measure of performance of the model.
+
+```{r, calculate AUC}
+#calculate area under the curve
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+auc 
+```
+
+The ROC curve suggests it is a good model as the closer the curve is to the top left corner the better the model. As this shows it has a high True positive rate with a low false postive rate which is what we want in a good model. The AUC is the area under the curve as this is close to on this also suggests its a good predictor as an AUC of 1 is a perfect model.
+
+##Question 2.4
+
+We can split the model into 10 equal size pieces and train on 9 of them and validate on 1 until weve used all 10 folds as the validation data. Averaging the accuracy over the 10 iterations we can estimate the accuracy of the model on a new data set.
+
+```{r, k-folds logit}
+folds <- cut(seq(1,nrow(druguse_predictors)),breaks=10,labels=FALSE)#cut data into 10 blocks
+Accuracy <- c()#create place to store accuracies in memory
+for(i in 1:10){
+    testIndexes <- which(folds==i,arr.ind=TRUE)#create indicies for test and training data
+    testingData <- druguse_predictors[testIndexes, ]#create test data
+    trainingData <- druguse_predictors[-testIndexes, ]#create training data
+    model <- glm(UseLevel ~ ., family=binomial(link='logit'), data=trainingData)#Create a logistic regression classifier using all predictors to predict UseLevel
+    pp=predict(model, newdata=testingData)#Create predictions 
+    mypreds=ifelse(pp>0.5, 1,0) # predict High if pp > 0.5 and predict Low otherwise.
+    
+    #calculate errors and correct predictions
+    TP=sum(mypreds==1 & testingData$UseLevel=="high")
+    FP=sum(mypreds==1 & testingData$UseLevel=="low")
+    TN=sum(mypreds==0 & testingData$UseLevel=="low")
+    FN=sum(mypreds==0 & testingData$UseLevel=="high")
+
+    Accuracy[i] <- (TP+TN)/(TP+TN+FN+FP)#store accuracy
+}
+summary(Accuracy)#use summary to see the average accuracy and other metrics
+```
+
+This provides a look at how the model will perform in general with the average and metrics such as max, min and quartiles to show how much the performance could vary in new data sets. 
+
+#Question 3
+
+##Question 3.1
+First we create a numerical version of the data set removing predictors with a high p value that we discovered in our data analysis. We also scale the data as it will help improve the accuracies of our classifiers and also how fast methods like neural nets converge.
+
+```{r}
+#remove predictors with high p value
+druguse_num <- druguse_num[,c(1:3,5,6,8:15)]
+#scale data using scale function and recreate dataframe
+druguse_num_s <- data.frame(lapply(druguse_num, scale))
+#add drug UseLevel column to dataframe
+druguse_num_s$UseLevel <- druguse$UseLevel
+```
+
+###Bootstrapping
+
+We will now use bootstrapping to determine the performance of the classifier on a new dataset. We randomly select a sample with replacement for training and then use rest of the data set to validate on.
+
+```{r}
+set.seed(1729)#set seed to Hardy-Ramanujan number so results using bootstrapping are consistent
+```
+
+
+##Naive Bayes
+
+The naive bayes classifier assumes the predictors are conditionally independent our data analysis suggests his may not be true thus affecting the performance of this classifier. Using bayes theorem we calculate the relative probabilities of a new observation vector being of class high or low given the values in the training set and classify based on which has the highest probability.
+
+
+```{r, naive bayes}
+Accuracybayes <- matrix(NA,nrow=10,ncol=1) #create place to store data
+colnames(Accuracybayes) <- "bayes"#name column
+for(i in 1:10){
+    bootsample <- sample(nrow(druguse_num_s),nrow(druguse_num_s), replace = T)#take sample indicies
+    outofbag <- setdiff(1:nrow(druguse_num_s), bootsample)#create validation data indicies
+    
+    modelbayes <- naiveBayes(UseLevel ~ ., data=druguse_num_s[bootsample,])#Create a naive bayes classifier for uselevel
+    pbayes <- predict(modelbayes, newdata=druguse_num_s[outofbag,])#Create predictions
+    
+    Accuracybayes[i,1] <- sum(pbayes==druguse_num_s$UseLevel[outofbag])/length(outofbag)#calculate accuracy
+}
+summary(Accuracybayes)#sumarise accuracy
+```
+
+Naive bayes provides a high mean accuracy however other techniques that make less assumptions may offer higher accuracies.
+
+###Linear Discrimanent Analysis
+
+Linear discriminanent analysis assumes a gaussian distribution or in this multinomial case a multivariate Gaussian distribution with a common covariance matrix for each class. It uses the training data to calculate the parameters of the multinomial Gaussian for each class by maximum likelihood. The decision boundaries are the the lines perpendicular to the lines joining the centroids of each classes gaussian. This classifies a new data point in which ever class has the highest probability essentially as we have assumed the covariance matricies are the same.
+
+```{r, LDA}
+Accuracylda <- matrix(NA,nrow=10,ncol=1) #create place to store data
+colnames(Accuracylda) <-"LDA"#name column
+for(i in 1:10){
+    bootsample <- sample(nrow(druguse_num_s),nrow(druguse_num_s), replace = T)#take sample indicies
+    outofbag <- setdiff(1:nrow(druguse_num_s), bootsample)#create validation data indicies
+    
+    modellda <- lda(UseLevel ~ ., data=druguse_num_s[bootsample,])#Create a linear discrimanent analysis classifier using predictors to predict UseLevel
+    pplda=predict(modellda, newdata=druguse_num_s[outofbag,])#Create predictions 
+
+    Accuracylda[i] <- sum(pplda$class==druguse_num_s$UseLevel[outofbag])/length(outofbag)#calculate accuracy
+}
+summary(Accuracylda)#summarise accuracy
+```
+
+LDA offers a higher accuracy than Naive Bayes we do have to assume a gaussian distribution but our data analysis suggests that most predictors are gaussian distributed. Thus suggesting that a multinomial gaussian distribution for predicting use level may be true. The range of accuracies is also lower.
+
+
+
+###Mixture Discrimant Analysis
+
+MDA assumes a Gaussian distribution like LDA but splits each class into subclasses that are assumed to be Gaussian and predicts the parameters of these Gaussians using maximum likelihood estimates. Splitting the classes into subclasses can allow MDA to create better decision boundaries than LDA. 
+
+```{r, MDA}
+Accuracymda <- matrix(NA, nrow = 10, ncol = 5)#create place to store accuracies
+colnames(Accuracymda) <- sprintf("MDA subclasses=%s", 1:5)#name columns according to number of subclasses
+for (r in 1:5){#test different numbers of subclasses
+  for(i in 1:10){
+      bootsample <- sample(nrow(druguse_num_s),nrow(druguse_num_s), replace = T)#take sample indicies
+      outofbag <- setdiff(1:nrow(druguse_num_s), bootsample)#create validation data indicies
+      
+      modelmda <- mda(UseLevel ~ ., data=druguse_num_s[bootsample,], subclasses = r)#Create a mda classifier to predict UseLevel with r subclasses
+      pmda <- predict(modelmda, newdata=druguse_num_s[outofbag,])#Create predictions 
+      
+      Accuracymda[i,r] <- sum(pmda==druguse_num_s$UseLevel[outofbag])/length(outofbag)#calculate accuracy
+  }
+}
+summary(Accuracymda)#summarise accuracy
+```
+
+MDA has a similar accuracy to LDA on average but a higher range suggesting splitting into subclasses has caused the model to overfit to the training data in some cases. 3 subclasses seems to provide the best accuracy but the accuracies are similar in each case so this may not be significant however the range of accuracies increases with the number of subclasses which suggests overfitting.
+
+##Support Vector Machines
+
+SVMs find a hyperplane to seperate the two classes. It finds this by maximising the perpendicular distance between the hyperplane and the data points of the two classes. One advantage of SVMs is you can change the shape of the hyperplane by using a kernel to allow for non-linear hyper planes. In this case we test polynomial, radial and sigmoid kernels as well as linear to see if they offer a better accuracy.
+
+
+```{r, SVMs}
+Accuracysvms <- matrix(NA, nrow = 10, ncol = 4)#allocate memory to store accuracies
+kernels <- c("linear", "polynomial", "radial", "sigmoid")#store kernel types so models can be created in for loop
+colnames(Accuracysvms) <- sprintf("SVM %s", kernels) #name columns of accuracies matrix
+for (r in 1:4){#repeat for each kernal type
+  for (i in 1:10){#repeat 10 times
+    bootsample <- sample(nrow(druguse_num_s),nrow(druguse_num_s), replace = T)#take sample inicies
+    outofbag <- setdiff(1:nrow(druguse_num_s), bootsample)#create validation data
+    
+    modelsvms <- svm(UseLevel~.,data = druguse_num_s[bootsample,], kernel=kernels[r])#create svm with kernel type kernels[r]
+    psvms <- predict(modelsvms, newdata=druguse_num_s[outofbag,])#predict on validation data
+    
+    Accuracysvms[i,r] <- sum(psvms==druguse_num_s$UseLevel[outofbag])/length(outofbag)#store accuracy 
+  }
+}
+summary(Accuracysvms)#show summary of accuracies
+```
+
+To compare each kernel we can create a boxplot of the accuracies of each kernel type.
+
+```{r, bp svms, fig.height=10, fig.width=10}
+bp.svms <- boxplot(Accuracysvms, horizontal=T, main="SVM kernel accuracies", ylab="Kernel", xlab="Accuracy", col=c(2,5,7,8)) #create boxplot comparing kernels
+```
+
+Out of the 4 kernels the linear kernel performs the best on average but offers similar performance to LDA.
+
+##Neural Networks
+
+We can use a neural network to predict the relationship between each predictor and use level. A neural network uses the training data to predict a function relating each of the predictors to use level. It does this by adjusting the weights of each node in the hidden layer at each iteration till it converges to a particular set of weights for each node. We can create a neural net with 10 nodes in the hidden layer and train using `nnet` on training data.
+
+```{r, create neural network}
+#create validation and training data from scaled data
+druguse_train_num_s <- druguse_num_s[1:1400,]
+druguse_val_num_s <- druguse_num_s[1401:1885,]
+
+#create a neural network
+nnmodel <- nnet(UseLevel~. , data=druguse_train_num_s, size = 10, maxit=1000) 
+
+```
+
+Calculate the accuracy and create a confusion table of the predictions on the validation dataset to evaluate the performance.
+
+```{r, predict neural network}
+#make predictions and create confusion matrix
+nnpredn = predict(nnmodel,druguse_val_num_s,type="class")
+tablenn <- table(nnpredn, druguse_val_num_s$UseLevel)
+#calculate correct and incorrect classifications of each type    
+TP=tablenn[2]
+FP=tablenn[1]
+TN=tablenn[3]
+FN=tablenn[4]
+#calculate accuracy 
+Accuracynn <- (TP+TN)/(TP+TN+FN+FP)  
+#print
+Accuracynn
+tablenn
+```
+
+The neural network has a lower accuracy than previous methods. We can plot the model using `plotnet` to visualise what the network looks like.
+
+```{r, plotnet, fig.height=10, fig.width=10}
+#plot neural network
+plotnet(nnmodel)
+```
+
+We can vary the number of nodes in the hidden layer to see if we can improve the accuracy and perform bootstrapping to see if we can improve the accuracy on a new dataset.
+
+```{r, compare nn sizes}
+Accuracynn <- matrix(NA ,nrow=10,ncol=4) #allocate memory to store accuracies
+colnames(Accuracynn) <- sprintf("NN size=%s",(1:4)*5)#name columns
+for (r in 1:4){#for loop for testing model sizes 5,10,15,20
+  for (i in 1:10){#for loop for bootstrapping each model
+    bootsample <- sample(nrow(druguse_num_s),nrow(druguse_num_s), replace = T)#take sample indicies
+    outofbag <- setdiff(1:nrow(druguse_num_s), bootsample)#create validation data indicies
+    #create model
+    nnmodel <- nnet(UseLevel~. , data=druguse_num_s[bootsample,], size = (r*5), maxit=1000, trace=F) #Train model and dont output trace
+    #predict on validation data and specify it as a classification prediction
+    nnpredn <- predict(nnmodel, druguse_num_s[outofbag,], type="class")
+    #calculate accuracy and store it
+    Accuracynn[i,r] <- sum(nnpredn==druguse_num_s$UseLevel[outofbag])/length(outofbag)#store accuracy     
+  }
+}
+summary(Accuracynn) #summarise accuracies of each neural network
+```
+
+We can summarise the accuracies to see the performance of the model. 5 nodes seems to perform the best on a new data set however it performs a bit worse than previous classifiers.
+
+###KNN
+We can use k-nearest neighbours a unsupervised method to predict the use level. We give it a training set and it evaluates a new point based on what the k nearest points in training set are classified as. We can create a for loop to try different values of k to find an optimal k.
+
+```{r, KNN}
+druguse_num_s_unsupervised <- druguse_num_s[,-14]#create a dataframe without uselevel
+AccuracyKNN <- matrix(NA, nrow = 10, ncol = 50)#allocate memory to store accuracies
+colnames(AccuracyKNN) <- sprintf("KNN k=%s",1:50)
+for (r in 1:50){#change k for each loop
+  for (i in 1:10){#repeat 10 times
+    bootsample <- sample(nrow(druguse_num_s_unsupervised),nrow(druguse_num_s_unsupervised), replace = T)#take sample indicies
+    outofbag <- setdiff(1:nrow(druguse_num_s_unsupervised), bootsample)#create validation data indicies
+    
+    pKNN <- knn(druguse_num_s_unsupervised[bootsample,],druguse_num_s_unsupervised[outofbag,],druguse_num_s[bootsample,]$UseLevel,k=r)#create knn classifier and predictions
+    
+    
+    AccuracyKNN[i,r] <- sum(pKNN==druguse_num_s[outofbag,]$UseLevel)/length(outofbag)#store accuracy 
+  }
+}
+summary(AccuracyKNN)#show summary of accuracies
+```
+
+We can plot the mean accuracy and the range of each k to see how accuracy varies as we change the number of nearest neighbours.
+
+```{r, KNN plot, fig.height=10, fig.width=10}
+AccuracyKNNdf <- data.frame(K=1:50, Mean=apply(AccuracyKNN,2,mean), Minimum=apply(AccuracyKNN,2,min), Maximum=apply(AccuracyKNN,2,max))#put accuracy statistics in a dataframe 
+ggplot(data = AccuracyKNNdf, aes(x=K, y=Mean, ymin=Minimum, ymax=Maximum)) + geom_pointrange() + geom_smooth(method='loess') + ggtitle("KNN accuracy for K = 1 to 50") + ylab("Accuracy") #plot the mean and max and minimum accuracy for each k with a line of best fit
+```
+
+At about k=20-25 the accuracy seems to plato suggesting above this point we risk overfitting the data. The accuracy is similar to that of previous methods.
+
+###Ensemble learning
+We can combine these methods above by taking the modal prediction of the above classifiers with equal weights in the hope of improving accuracy and reducing the range of accuracies of the model on different data sets. As previous methods had similar accuracies this may allow us to obtain a better overall accuracy as even though they have similar accuracies they may not be getting the same data points misclassified.
+
+```{r, ensamble}
+Accuracyen <- matrix(NA, nrow = 10, ncol = 1)#allocate memory to store accuracies
+colnames(Accuracyen) <- "Ensemble" #name columns
+
+#find mode function
+getmodalvalue <- function(x) {
+   u <- unique(x)#find unique values of x
+   u[which.max(tabulate(match(x, u)))]#find modal value of x
+}
+
+
+for (i in 1:10){#repeat 10 times for bootstrapping
+  bootsample <- sample(nrow(druguse_num_s_unsupervised),nrow(druguse_num_s_unsupervised), replace = T)#take sample indicies
+  outofbag <- setdiff(1:nrow(druguse_num_s_unsupervised), bootsample)#create validation data indicies
+  
+  #create models
+  models <- list(glm(UseLevel ~ ., family=binomial(link='logit'), data=druguse_num_s[bootsample,]),
+                 naiveBayes(UseLevel ~ ., data=druguse_num_s[bootsample,]),
+                 lda(UseLevel ~ ., data=druguse_num_s[bootsample,]),
+                 mda(UseLevel ~ ., data=druguse_num_s[bootsample,], subclasses = 3),
+                 svm(UseLevel~.,data = druguse_num_s[bootsample,], kernel="linear"))
+  predictions <- lapply(models,predict,newdata=druguse_num_s[outofbag,])#create predictions
+  
+  predictions[[1]] <- ifelse(predictions[[1]]>0.5, 'high','low')#set cut off for glm
+  
+  predictions[[3]] <- predictions[[3]]$class#extract class from lda predictions
+  predictions[[6]] <- knn(druguse_num_s_unsupervised[bootsample,],druguse_num_s_unsupervised[outofbag,],druguse_num_s[bootsample,]$UseLevel,k=25)#create knn classifier and predictions
+  nnmodel <- nnet(UseLevel~. , data=druguse_num_s[bootsample,], size = 5, maxit=1000, trace=F)#create neural network with no trace
+  predictions[[7]] <- predict(nnmodel, druguse_num_s[outofbag,], type="class") #add neural network predictions 
+  predictions <- apply(data.frame(predictions),2,as.character)#set all predictions elements to character type using apply
+  
+  finalpred <- apply(predictions,1,getmodalvalue)#find mode of each row of the predictions from each model
+  
+  Accuracyen[i] <- sum(finalpred==druguse_num_s$UseLevel[outofbag])/length(outofbag)#store accuracy 
+}
+summary(Accuracyen)#sumarise accuracy of equally weighted ensamble
+```
+
+We then use summary to show the performance of our classifier on a new data set. We see the performance is similar to some of the techniques on their own. If we change the weights of each prediction we could improve this. We could do this ourselves trying different values but this would take a long time. So we could use a neural network to change the weights of each model in our classifier. A neural network could learn appropriate weights to improve performance of the classifier faster than us using a for loop to change weights to find the best weights.
+
+```{r,ensamble nn}
+classifiers <- sprintf("%s",1:7)#create colnames for 2nd nnet input
+Accuracyennn <- matrix(NA, nrow=10, ncol=4)#create matrix to store accuracies
+colnames(Accuracyennn) <- sprintf("Nodes %s", (1:4)*5)#create names for accuracy matrix columns
+for (r in 1:4){#try different nn sizes 5,10,15,20
+  for (i in 1:10){#repeat 10 times
+    bootsample <- sample(nrow(druguse_num_s_unsupervised),nrow(druguse_num_s_unsupervised), replace = T)#take sample indicies
+    outofbag <- setdiff(1:nrow(druguse_num_s_unsupervised), bootsample)#create validation data indicies
+    
+    #create models
+    models <- list(glm(UseLevel ~ ., family=binomial(link='logit'), data=druguse_num_s[bootsample,]),
+                   naiveBayes(UseLevel ~ ., data=druguse_num_s[bootsample,]),
+                   lda(UseLevel ~ ., data=druguse_num_s[bootsample,]),
+                   mda(UseLevel ~ ., data=druguse_num_s[bootsample,], subclasses = 3),
+                   svm(UseLevel~.,data = druguse_num_s[bootsample,], kernel="linear"))
+    #predict using models
+    predictions <- lapply(models,predict,newdata=druguse_num_s[outofbag,])
+    
+    predictions[[1]] <- ifelse(predictions[[1]]>0.5, 'high','low')#set cut off for glm
+    
+    predictions[[3]] <- predictions[[3]]$class#extract class for lda
+    predictions[[6]] <- knn(druguse_num_s_unsupervised[bootsample,],druguse_num_s_unsupervised[outofbag,],druguse_num_s[bootsample,]$UseLevel,k=25)#create knn classifier and predictions
+    nnmodel1 <- nnet(UseLevel~. , data=druguse_num_s[bootsample,], size = 5, maxit=1000, trace=F)#make nnet with no trace
+    predictions[[7]] <- predict(nnmodel1, druguse_num_s[outofbag,], type="class")  #predict using nnet
+    predictions <- data.frame(apply(data.frame(predictions),2,as.character)) #make each element of character type using apply
+    
+    colnames(predictions) <- classifiers #assign names to columns for next nnet
+    
+    predictions$UseLevel <- druguse$UseLevel[outofbag] #add true uselevels as column to predictions data frame 
+    
+    nnmodel2 <- nnet(UseLevel~.,data=predictions, size=(r*5), maxit=1000, trace=F) #make 2nd neural network using predictions from all models with no trace
+    
+    #make new samples
+    bootsample <- sample(nrow(druguse_num_s_unsupervised),nrow(druguse_num_s_unsupervised), replace = T)#take sample indicies
+    outofbag <- setdiff(1:nrow(druguse_num_s_unsupervised), bootsample)#create validation data indicies
+    
+    #create predictions on new inicies using models made previously
+    predictions <- lapply(models,predict,newdata=druguse_num_s[outofbag,])
+    
+    predictions[[1]] <- ifelse(predictions[[1]]>0.5, 'high','low')
+    
+    predictions[[3]] <- predictions[[3]]$class
+    predictions[[6]] <- knn(druguse_num_s_unsupervised[bootsample,],druguse_num_s_unsupervised[outofbag,],druguse_num_s[bootsample,]$UseLevel,k=25)#create knn classifier and predictions
+ 
+    predictions[[7]] <- predict(nnmodel1, druguse_num_s[outofbag,], type="class") #make predictions using neural net 
+    predictions <- data.frame(apply(data.frame(predictions),2,as.character)) #make all elements of character type
+    
+    colnames(predictions) <- classifiers #assign same names to columns
+    
+    predictions$UseLevel <- druguse$UseLevel[outofbag] #add true use level
+    
+    finalpred <- predict(nnmodel2,predictions,type='class') #make final predictions using 2nd nnet and new predictions
+    
+    Accuracyennn[i,r] <- sum(finalpred==druguse_num_s$UseLevel[outofbag])/length(outofbag)#store accuracy 
+  }
+}
+summary(Accuracyennn)#sumarise accuracies
+```
+
+Summarise the accuracy of the classifier to see how the classifier performs. This technique with 10 nodes seems to perform best as the neural network modifies the weights of each classifiers performance based on its relative performance we see a slight improvement over the methods on their own.
+
+##Question 3.2
+To estimate how the model performs on a new data set I have used bootstrapping where the training data set is randomly sampled with replacement from the whole data set and the rest of the data set is used as a validation data set. To compare the classifiers and the ensemble learning techniques we can plot a boxplot. We only plot the best performing classifier for classification techniques where we tested multiple parameters.
+
+```{r, fig.height=10, fig.width=10}
+comparison <- data.frame("GLM"=Accuracy, "Naive Bayes"=Accuracybayes, "LDA"=Accuracylda,"MDA"=Accuracymda[,3],"SVM"=Accuracysvms[,1],"NN"=Accuracynn[,1], "KNN"=AccuracyKNN[,25],"Ensemble"=Accuracyen,"Ensemble NN"=Accuracyennn[,2])#create data frame of accuracies of the models with their best parameters
+
+melted_comparison <- melt(comparison)#reshape to make it easier to plot
+
+ggplot(melted_comparison, aes(x=variable, y=value, fill=variable)) + geom_boxplot(colour=rainbow(9)) + coord_flip()  + theme(legend.position="none") + xlab("Classifier") + ylab("Accuracy") + ggtitle("Comparison of classification techniques for use level") #create horizontal boxplot of all techniques accuracies 
+
+
+```
+
+The ensamble neural net technique perform best as some classifiers perform better in certain cases and the neural net tries to learn the best possible combination of the classifiers predictions to get the highest accuracy which it has done successfully but the performance of the logistic regression classifier is similar. However a predicted average accuracy of 85% on a new data set is high.
+
+#Question 4
+
+##Question 4.1
+
+Add a new column of factors for whether the individual has ever used heroin.
+```{r}
+#create used heroin column and assign yes or no
+druguse$usedheroin[druguse$heroin==0] <- 'no'
+druguse$usedheroin[druguse$heroin!=0] <- 'yes'
+druguse$usedheroin <- as.factor(druguse$usedheroin) #change from character to factor type 
+str(druguse) #check column has been added to the dataframe and is of correct type
+```
+
+Create the training and test data sets including the new used heroin column and other relevant columns.
+
+```{r}
+druguseheroin_predictors <- druguse[c(1:23,25:30,34)]#create dataframe only of predictors removing unwanted columns
+druguseheroin_train <- druguseheroin_predictors[1:1400,] #create training data by removing rows of test data
+druguseheroin_test <- druguseheroin_predictors[1401:1885,]#create test data from remaining rows
+```
+
+Create a random forest, a confusion table and calculate the accuracy.  
+
+```{r}
+rf.heroin <- randomForest(usedheroin ~ ., data=druguseheroin_train) #create a random forest
+prf=predict(rf.heroin, newdata=druguseheroin_test)#Create predictions 
+
+tablerfh <- table(prf,druguseheroin_test$usedheroin) #create confusion table
+
+#calculate incorrect and correct classifications of each type
+TP=tablerfh[1]
+FP=tablerfh[2]
+TN=tablerfh[3]
+FN=tablerfh[4]
+
+Accuracyrfh <- (TP+TN)/(TP+TN+FN+FP)#calculate accuracy
+tablerfh #output table
+Accuracyrfh #output accuracy
+```
+
+The random forest performs well however in the data set there arent many people who have used heroin so a classifier can perform well on the data set by being very biased towards picking no. This is why in the confusion table we have more false negatives than false positives suggesting the classifier may be doing this to an extent. The numbers of yes and no are shown below to illistrate this.
+
+```{r}
+x <- druguse %>% group_by(usedheroin) %>% tally() #tally number of people who have and havent used heroin
+x #print tibble
+x[1,2]/nrow(druguse) #show accuracy if just predict no all the time
+```
+As shown above 85% of the data set is no so if we produce a classifier just predicting no we can expect an accuracy of arround 85%. This means the random forest only performs slightly better than this.
+
+
+##Question 4.2
+Predict severity based on first 14 predictors and cannabis use but no other illegal substances and without the non-significant predictors shown in the data analysis (alcohol, extraversion and country). We use scaled data as this will likely improve the performance of our regession models and create the data set of the predictors and severity. As this is regression we will compare the regressors by their mean squared error. We can only choose regression techniques as severity isnt a class. We can evaluate each technique and if it performs well we can use it in an ensemble like in question 3 to see if we can lower the MSE.
+```{r, severity dataset}
+druguse_pred_sev <- druguse_num_s_unsupervised #without variables with high p value
+druguse_pred_sev$cannabis <- scale(druguse$cannabis) #add scaled cannabis usage
+druguse_pred_sev$severity <- scale(druguse$severity) #add scaled severity
+
+```
+
+###Lasso/Ridge regression
+
+Lasso and Ridge regression are penalised linear regression techniques. So tries to find a set of coefficents of the predictors but subject to a penalty on large values of coefficents this means it is less susceptible to data sets with extreme values and thus is a shrinkage method. This could make it work well with our data.
+
+```{r, lasso}
+mselasso <- matrix(NA,nrow = 10,ncol = 21)#create array to store mse 
+colnames(mselasso) <- sprintf("Lasso/Ridge alpha=%s",(1:21-1)/20)#name columns
+
+for (r in 1:21){#alpha = 0,0.05,0.1....1 with alpha=0 being pure ridge and alpha=1 pure lasso 
+  for (i in 1:10){#repeat 10 times
+    bootsample <- sample(nrow(druguse_pred_sev),nrow(druguse_pred_sev), replace = T)#take sample indicies
+    outofbag <- setdiff(1:nrow(druguse_pred_sev), bootsample)#create validation data indicies
+    
+    #create input for model
+    x <- model.matrix(severity~., druguse_pred_sev[bootsample,])#train x
+    y <- druguse_pred_sev$severity[bootsample,] #train y
+    
+    
+    modellasso <- cv.glmnet(x,y, alpha = (r-1)/20)#create lasso/ridge with alpha=0 to 1 and find optimal lambda
+    plas <- predict(modellasso, as.matrix(druguse_pred_sev[outofbag,]), s = 'lambda.min')#predict on validation data
+    
+    mselasso[i,r] <- mean((plas - druguse_pred_sev$severity[outofbag])^2)#calculate mean squared error and store
+  }
+}
+summary(mselasso)#sumarise mse
+```
+
+We can plot alpha against the average mean squared error to see the optimal alpha.
+
+```{r, lasso plot,fig.height=10, fig.width=10}
+#create dataframe from data for ggplot
+lasso <- data.frame("alpha"=(1:21 - 1)/20, "avg mse"=apply(mselasso,2,mean))
+
+#plot avg mse and alpha in ggplot 
+ggplot(data = lasso, aes(x = alpha, y = avg.mse)) + geom_smooth() + geom_point() + ggtitle("Average MSE for alpha")
+
+```
+The plot suggests better peformance as alpha goes to 1 ie lasso rather than ridge however the difference is small.
+
+###General Linear Model
+
+We can apply a general linear model again this time using family gaussian as this is regression question and in our data analysis the data appeared to be gaussian distributed. We also use a basis transformation on the model to include the products of predictors as well as this may improve accuracy at the risk of overfitting.
+
+```{r, glm}
+mseglm <- matrix(NA, nrow = 10, ncol = 1)#create place to store mse
+colnames(mseglm) <- "GLM"#mame column
+for (i in 1:10){#repeat 10 times
+  bootsample <- sample(nrow(druguse_pred_sev),nrow(druguse_pred_sev), replace = T)#take sample indicies
+  outofbag <- setdiff(1:nrow(druguse_pred_sev), bootsample)#create validation data indicies
+  
+  
+  modelglm <- glm(severity~.^2, data = druguse_pred_sev, family = gaussian(link = "identity")) #create glm model using the predictors and their products
+  
+  pglm <- predict(modelglm, druguse_pred_sev[outofbag, ])#predict on validation data
+  
+  mseglm[i] <- mean((pglm - druguse_pred_sev$severity[outofbag,])^2) #calculate mean squared error
+}
+summary(mseglm)#show summary of mse
+```
+
+The GLM performs worse than ridge regression this could be due to extreme values that dont effect lasso/ridge regression as much as a method that doesn't penalise them such as a GLM.
+
+
+###Multivariate Adaptive Regression Splines
+
+MARS uses regression splines that split the predictors into sections which it fits a linear model. It does this adaptively to multiple variables it does this by going forwards first finding a pair of predictors that produces the lowest sum of squares residual error by testing every combination. Adding more predictors this way. It then goes backwards removing the least effective terms until it finds the best model. We can create a model as below and summarise the accuracies. This could allow us to further remove unuseful predictors and as this method uses splines it can create a peicewise linear model which may be a better regressor than one that is completely linear.
+
+
+```{r,mars}
+msemars <- matrix(NA,nrow = 10, ncol = 1)#create place to store mse
+colnames(msemars) <- "MARS"#name column
+for (i in 1:10){#repeat 10 times
+  bootsample <- sample(nrow(druguse_pred_sev),nrow(druguse_pred_sev), replace = T)#take sample indicies
+  outofbag <- setdiff(1:nrow(druguse_pred_sev), bootsample)#create validation data indicies
+  
+  x <- druguse_pred_sev[bootsample, -15]
+  y <- druguse_pred_sev$severity[bootsample] 
+  
+  modelmars <- mars(x, y, forward.step = T, prune = T, degree = 1) #create linear mars model
+  pmars <- predict(modelmars, druguse_pred_sev[outofbag,-15])#predict on validation data
+  
+  msemars[i] <- mean((pmars - druguse_pred_sev$severity[outofbag])^2) #calculate mean squared error
+}
+summary(msemars)#show summary of mse
+```
+
+MARS offers higher MSE than the previous techniques.
+
+We can plot the cuts of each predictor from the model as below. Straight lines indicate predictors that the model thinks are not significant through it's forward step and then backwards pruning of predictors.
+
+```{r, cuts, fig.height=15, fig.width=10}
+par(mfrow = c(4, 4))#create 4x4 grid in plotting device
+for (i in 1:14)#plot all predictors
+  {
+    xp <- matrix(sapply(druguse_pred_sev[1:14], mean), nrow(druguse_pred_sev), ncol(druguse_pred_sev) - 1, byrow = TRUE)#create matrix of means
+    xr <- sapply(druguse_pred_sev, range)#find range of each predictor
+    xp[, i] <- seq(xr[1, i], xr[2, i], len=nrow(druguse_pred_sev))#create sequence of the length of the rows of df across the range of each predictor
+    xf <- predict(modelmars, xp)#predict on the sequence
+    plot(xp[, i], xf, xlab = names(druguse_pred_sev)[i], ylab = "", type = "l");#plot predictions against range of each predictor
+  }
+```
+
+###Neural Net
+
+We can use a neural network again testing different sizes to predict severity. Neural nets try to predict a function that relates the predictors to the value being predicted so could be a good technique for regression. We can test different sizes to see the optimal size
+
+```{r,neural net, results='hide'}
+msenn <- matrix(NA,nrow=10,ncol=4) #allocate memory to store accuracies
+colnames(msenn) <- sprintf("NN nodes=%s", (1:4)*5)
+for (r in 1:4){#for loop for testing model sizes 5,10,15,20
+  for (i in 1:10){#for loop for cross validating each model
+    bootsample <- sample(nrow(druguse_pred_sev),nrow(druguse_pred_sev), replace = T)#take sample inicies
+    outofbag <- setdiff(1:nrow(druguse_pred_sev), bootsample)#create validation data
+
+    nnmodel <- nnet(severity~. , data=druguse_pred_sev[bootsample,], size = (r*5), maxit=1000, linout=T, trace=F) #create nnet with linear output
+    #predict on validation data
+    nnpredn = predict(nnmodel,druguse_pred_sev[outofbag,])
+
+    #calculate accuracy and store it
+    msenn[i,r] <- mean((nnpredn - druguse_pred_sev$severity[outofbag])^2) 
+  }
+}
+summary(msenn)#summarise mse
+```
+
+We can use summary to see the mse of the neural nets. The performance of the neural nets is poor with a high range as there are extreme outliers this suggests its not a good model in this case. 
+
+###Ensemble Learning
+
+We can provide the models not including the neural net as its performance is poor into an ensamble technique by taking the mean average output of the predictions of the regressors rather than the mode as in the classification case. This will hopefully lower the MSE.
+
+```{r, ensamble4}
+mseen <- matrix(NA, nrow=10, ncol=1)#create matrix to store accuracies
+colnames(mseen) <- "Ensemble"#create names for accuracy matrix 
+
+for (i in 1:10){#repeat 10 times
+  bootsample <- sample(nrow(druguse_num_s_unsupervised),nrow(druguse_num_s_unsupervised), replace = T)#take sample indicies
+  outofbag <- setdiff(1:nrow(druguse_num_s_unsupervised), bootsample)#create validation data indicies
+  
+  #create inputs for rigde ands lasso
+  x <- model.matrix(severity~., druguse_pred_sev[bootsample,])
+  y <- druguse_pred_sev$severity[bootsample] 
+  
+  modelridge <- cv.glmnet(x,y, alpha = 0)#create ridge model
+  ridgepred <-  predict(modelridge, as.matrix(druguse_pred_sev[outofbag,]), s = 'lambda.min')#create predictions
+  
+  modellasso <- cv.glmnet(x,y, alpha = 1)#create lasso model
+  lassopred <-  predict(modellasso, as.matrix(druguse_pred_sev[outofbag,]), s = 'lambda.min')#create predictions
+  
+  modelglm <- glm(severity~.^2, data = druguse_pred_sev, family = gaussian(link = "identity")) #create glm
+  pglm <- predict(modelglm, druguse_pred_sev[outofbag, ])#predict on validation data
+  
+  #create input for mars
+  x <- druguse_pred_sev[bootsample, -15]
+  y <- druguse_pred_sev$severity[bootsample] 
+
+  modelmars <- mars(x, y, forward.step = T, prune = T, degree = 1) #create mars model
+  pmars <- predict(modelmars, druguse_pred_sev[outofbag,-15])#predict on validation data
+  
+  
+  predictions <- data.frame("ridge"=ridgepred, "lasso"=lassopred, "glm"=pglm, "mars"=pmars)#create data frame of predictions
+  
+  finalpred <- apply(predictions,1,mean) #make final predictions by averaging predictions of each model
+  
+  mseen[i] <- mean((finalpred - druguse_pred_sev$severity[outofbag])^2) #calculate mse
+}
+summary(mseen)#summarise mse
+```
+This offers an improvement over the regression techniques individually with a small range.
+
+We can as before use a neural net instad of averaging to see if it can find a better way of combining them than using the mean as different regressors are better at predicting than others in certain cases.
+
+```{r, ensamble4 nn}
+mseennn <- matrix(NA, nrow=10, ncol=4)#create matrix to store accuracies
+colnames(mseennn) <- sprintf("Ensemble NN nodes=%s", (1:4)*5)#create names for accuracy matrix 
+for (r in 1:4){
+  for (i in 1:10){#repeat 10 times
+    bootsample <- sample(nrow(druguse_num_s_unsupervised),nrow(druguse_num_s_unsupervised), replace = T)#take sample indicies
+    outofbag <- setdiff(1:nrow(druguse_num_s_unsupervised), bootsample)#create validation data indicies
+    
+    #create inputs for rigde ands lasso
+    x <- model.matrix(severity~., druguse_pred_sev[bootsample,])
+    y <- druguse_pred_sev$severity[bootsample] 
+    
+    modelridge <- cv.glmnet(x,y, alpha = 0)#create ridge model
+    ridgepred <-  predict(modelridge, as.matrix(druguse_pred_sev[outofbag,]), s = 'lambda.min')#create predictions
+    
+    modellasso <- cv.glmnet(x,y, alpha = 1)#create lasso model
+    lassopred <-  predict(modellasso, as.matrix(druguse_pred_sev[outofbag,]), s = 'lambda.min')#create predictions
+    
+    modelglm <- glm(severity~.^2, data = druguse_pred_sev, family = gaussian(link = "identity")) #create glm
+    pglm <- predict(modelglm, druguse_pred_sev[outofbag, ])#predict on validation data
+    
+    #create input for mars
+    x <- druguse_pred_sev[bootsample, -15]
+    y <- druguse_pred_sev$severity[bootsample] 
+  
+    modelmars <- mars(x, y, forward.step = T, prune = T, degree = 1) #create mars model
+    pmars <- predict(modelmars, druguse_pred_sev[outofbag,-15])#predict on validation data
+    
+    
+    predictions <- data.frame("ridge"=ridgepred, "lasso"=lassopred, "glm"=pglm, "mars"=pmars)#create data frame of predictions
+    predictions$severity <- druguse_pred_sev$severity[outofbag] #add severity column
+    
+    nnmodelen <- nnet(severity~., data=predictions, linout=T, maxit=1000, size=(r*5), trace=F)#create nn model using predictors 
+    
+    #create new samples
+    bootsample <- sample(nrow(druguse_num_s_unsupervised),nrow(druguse_num_s_unsupervised), replace = T)#take sample indicies 
+    outofbag <- setdiff(1:nrow(druguse_num_s_unsupervised), bootsample)#create validation data indicies
+    
+    ridgepred <-  predict(modelridge, as.matrix(druguse_pred_sev[outofbag,]), s = 'lambda.min')#create predictions
+    lassopred <-  predict(modellasso, as.matrix(druguse_pred_sev[outofbag,]), s = 'lambda.min')#create predictions
+    pglm <- predict(modelglm, druguse_pred_sev[outofbag, ])#predict on validation data
+    pmars <- predict(modelmars, druguse_pred_sev[outofbag,-15])#predict on validation data
+    
+    predictions2 <- data.frame("ridge"=ridgepred, "lasso"=lassopred, "glm"=pglm, "mars"=pmars)#create data frame of predictions
+    predictions2$severity <- druguse_pred_sev$severity[outofbag] #add severity column
+    
+    finalpred <- predict(nnmodelen, newdata=predictions2) #use nnet model to make predictions
+    
+    mseennn[i,r] <- mean((finalpred - druguse_pred_sev$severity[outofbag])^2) #calculate mse
+  }
+}
+summary(mseennn)#summarise mse
+```
+The performance is best with with 10 nodes in the hidden layer and is substantially better than any previous technique.
+
+###Comparison
+
+We can compare the relative performance of the models by using a boxplot to show their MSE. We have to remove some extreme outliers from the neural nets and only plot pure ridge and lasso.
+
+```{r, mse plot,fig.height=15, fig.width=10}
+mse <- cbind(mselasso[,c(1,21)],mseglm,msemars,msenn,mseen,mseennn)#combine mse matricies
+mse_melted <- melt(mse)#melt to reshape and turn to data frame
+mse_melted_outlier <- mse_melted[mse_melted$value<1,] #remove extreme outliers from neural nets
+
+ggplot(mse_melted_outlier, aes(x=Var2, y=value, fill=Var2)) + geom_boxplot(colour=rainbow(13)) + coord_flip()  + theme(legend.position="none") + xlab("Regression technique") + ylab("MSE") + ggtitle("Comparison of regression techniques for severity") #crate boxplot of all techniques mses
+
+```
+
+We see the ensamble techniques offer the lowest MSE like they did in the classification problem with the neural network ensamble technique having musch lower MSEs than any other method. 10 node neural net ensemble performing the best but other numbers of nodes performing similarly.The neural nets performing badly as techniques on their own but suprisingly the best when used to combine the outputs of the other regressors. 
+
+#Question 5
+
+In question 1 we showed that the pvalues of country, extraversion and alcohol are not significant in predicting use level or severity suggesting they aren't relevant in predicting substance abuse.
+
+```{r,uselevel accuracy}
+druguse %>% group_by(UseLevel, alcohol) %>% tally()#group by uselevel and alcohol in the dataframe and tally cases
+```
+
+we can see for uselevel high and low theyre similarly distributed suggesting that regardless of druguse alcohol use is similarly distributed
+
+```{r, histuselevel1, fig.height=10, fig.width=10}
+par(mfrow=c(1,2))#create space in ploting device to have histograms next to each other
+hist(druguse$alcohol[druguse$UseLevel=='high'],main = "Alcohol given high use level", xlab ="Alcohol", breaks=6)#plot histogram
+hist(druguse$alcohol[druguse$UseLevel=='low'],main = "Alcohol given low use level", xlab ="Alcohol", breaks=6)#plot histogram
+
+```
+
+Plotting the histograms we can see they are very similarly distributed in both cases suggesting its not a good predictor. This is why it has a correlation near to zero and a high pvalue. The same is true of country and extraversion. In the case of country however it may be bacause most of the data comes from the UK or US and theres not much data for other countries.
+
+```{r,uselevel country}
+druguse %>% group_by(UseLevel, country) %>% tally()#group by uselevel and country in the dataframe and tally cases
+```
+
+```{r, histuselevel2, fig.height=10, fig.width=10}
+par(mfrow=c(1,2))#create space in ploting device to have histograms next to each other
+hist(druguse$extraversion[druguse$UseLevel=='high'],main = "Extraversion given high use level", xlab ="Extraversion", breaks=6)#plot histogram
+hist(druguse$extraversion[druguse$UseLevel=='low'],main = "Extraversion given low use level", xlab ="Extraversion", breaks=6)#plot histogram
+
+```
+
+Severity and Use Level are highly correlated so the same predictors are also not significant for the same reasons. However in the case of any drug use the unsignificant predictors are different.
+
+
+```{r, p values any}
+pvalues_cor_any <- melted_cor_pvalues_ord[melted_cor_pvalues_ord$Var1=="any",]#find pvalues relating to any
+head(pvalues_cor_any)#show head
+```
+We can see country and chocolate are not significant at the 5% significance level for any.
+
+```{r, any chocolate country}
+druguse %>% group_by(any, chocolate) %>% tally()#group by any and chocolate and tally
+druguse %>% group_by(any, country) %>% tally()#group by any and country and tally
+```
+
+From this we can see that this is because in the case of chocolate the data is similarly distributed for true and false this is shown in the histograms drawn below. In the case of country this is bacause there aren't mant falses for any country as shown above. This why they have a correlation of around 0.
+
+```{r, histanychocolate, fig.height=10, fig.width=10}
+par(mfrow=c(1,2))#create space in ploting device to have histograms next to each other
+hist(druguse$chocolate[druguse$any==T],main = "Chocolate given they use drugs", xlab ="Chocolate", breaks=6)#plot histogram 
+hist(druguse$chocolate[druguse$any==F],main = "Chocolate given they use drugs", xlab ="Chocolate", breaks=6)#plot histogram
+```
+
+In the summary of the logistic regression model of question 2 all of these predictors werent significant in the model however country being UK was significant where as other countries were not and the age groups other than 45-54 and 55-64 weren't significant and ethnicity, nueroticism, agreeableness and caffeine weren't significant. 
+In the summary of that model it suggests gender being male, country being UK, open to experience, education, concientiousness, sensation and nicotine are significant. 
+These being significant make sense things like alcohol are likely not significant because the data set is prodomantly UK and US where drinking alcohol is very common regardless of traits of a person making it not a useful predictor.
+
+
+
+
+
+
+
+
+
